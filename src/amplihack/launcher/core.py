@@ -3,6 +3,7 @@
 import atexit
 import logging
 import os
+import platform
 import shlex
 import signal
 import subprocess
@@ -19,6 +20,14 @@ from .detector import ClaudeDirectoryDetector
 from .repo_checkout import checkout_repository
 
 logger = logging.getLogger(__name__)
+
+# Platform-specific emoji support
+IS_WINDOWS = platform.system() == "Windows"
+EMOJI = {
+    "check": "[OK]" if IS_WINDOWS else "✓",
+    "warning_emoji": "[!]" if IS_WINDOWS else "⚠️",
+    "ok_emoji": "[OK]" if IS_WINDOWS else "✅",
+}
 
 
 class ClaudeLauncher:
@@ -487,7 +496,7 @@ class ClaudeLauncher:
             for dir_path in required_dirs:
                 dir_path.mkdir(parents=True, exist_ok=True)
 
-            print(f"✓ Runtime directories ensured in {runtime_dir}")
+            print(f"{EMOJI['check']} Runtime directories ensured in {runtime_dir}")
             return True
 
         except (OSError, PermissionError) as e:
@@ -548,7 +557,7 @@ class ClaudeLauncher:
                 # Write back with absolute paths
                 with open(settings_file, "w") as f:
                     json.dump(settings, f, indent=2)
-                print(f"✓ Fixed hook paths in {settings_file.relative_to(target_dir)}")
+                print(f"{EMOJI['check']} Fixed hook paths in {settings_file.relative_to(target_dir)}")
 
             return True
 
@@ -611,7 +620,7 @@ class ClaudeLauncher:
                 # Update env with proxy settings, especially ANTHROPIC_BASE_URL
                 if proxy_env.get("ANTHROPIC_BASE_URL"):
                     env["ANTHROPIC_BASE_URL"] = proxy_env["ANTHROPIC_BASE_URL"]
-                    print(f"✓ Configured Claude to use proxy at {proxy_env['ANTHROPIC_BASE_URL']}")
+                    print(f"{EMOJI['check']} Configured Claude to use proxy at {proxy_env['ANTHROPIC_BASE_URL']}")
                 if proxy_env.get("ANTHROPIC_API_KEY"):
                     env["ANTHROPIC_API_KEY"] = proxy_env["ANTHROPIC_API_KEY"]
 
@@ -697,7 +706,7 @@ class ClaudeLauncher:
                 # Update env with proxy settings, especially ANTHROPIC_BASE_URL
                 if proxy_env.get("ANTHROPIC_BASE_URL"):
                     env["ANTHROPIC_BASE_URL"] = proxy_env["ANTHROPIC_BASE_URL"]
-                    print(f"✓ Configured Claude to use proxy at {proxy_env['ANTHROPIC_BASE_URL']}")
+                    print(f"{EMOJI['check']} Configured Claude to use proxy at {proxy_env['ANTHROPIC_BASE_URL']}")
                 if proxy_env.get("ANTHROPIC_API_KEY"):
                     env["ANTHROPIC_API_KEY"] = proxy_env["ANTHROPIC_API_KEY"]
 
@@ -717,10 +726,10 @@ class ClaudeLauncher:
             # Restore settings.json backup if exists
             if settings_manager.backup_path:
                 if settings_manager.restore_backup():
-                    print("  ✅ Restored settings.json from backup")
+                    print(f"  {EMOJI['ok_emoji']} Restored settings.json from backup")
                 else:
                     print(
-                        "  ⚠️  Could not restore settings.json - backup remains for manual recovery"
+                        f"  {EMOJI['warning_emoji']} Could not restore settings.json - backup remains for manual recovery"
                     )
 
             # Clean up proxy
@@ -757,7 +766,7 @@ class ClaudeLauncher:
             return True
         except Exception as e:
             method_logger.error("Neo4j startup failed: %s", e)
-            print(f"\n⚠️  Neo4j startup error: {e}")
+            print(f"\n{EMOJI['warning_emoji']} Neo4j startup error: {e}")
             print("Continuing with basic memory system...\n")
             return True
 

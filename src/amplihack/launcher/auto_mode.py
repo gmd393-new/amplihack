@@ -3,7 +3,7 @@
 import asyncio
 import json
 import os
-import pty
+import platform
 import re
 import subprocess
 import sys
@@ -12,6 +12,12 @@ import time
 from contextlib import nullcontext
 from pathlib import Path
 
+# pty is Unix-only, not available on Windows
+if platform.system() != "Windows":
+    import pty
+else:
+    pty = None
+
 # Try to import Claude SDK, fall back gracefully
 try:
     from claude_agent_sdk import ClaudeAgentOptions, query  # type: ignore
@@ -19,6 +25,17 @@ try:
     CLAUDE_SDK_AVAILABLE = True
 except ImportError:
     CLAUDE_SDK_AVAILABLE = False
+
+# Try to import Rich for markdown rendering
+try:
+    from rich.console import Console
+    from rich.markdown import Markdown
+
+    RICH_AVAILABLE = True
+except ImportError:
+    RICH_AVAILABLE = False
+    Console = None
+    Markdown = None
 
 # Import session management components
 from amplihack.launcher.fork_manager import ForkManager
@@ -35,6 +52,22 @@ PROMPT_INJECTION_PATTERNS = [
     r"you\s+are\s+now",
     r"override\s+all",
 ]
+
+# Platform-specific emoji support
+IS_WINDOWS = platform.system() == "Windows"
+
+# Emoji mappings for cross-platform compatibility
+EMOJI = {
+    "check": "[OK]" if IS_WINDOWS else "✓",
+    "cross": "[X]" if IS_WINDOWS else "✗",
+    "warning": "[!]" if IS_WINDOWS else "⚠",
+    "clock": "[~]" if IS_WINDOWS else "⟳",
+    "circle": "o" if IS_WINDOWS else "○",
+    "clipboard": "[TODO]" if IS_WINDOWS else "📋",
+    "search": "[?]" if IS_WINDOWS else "🔍",
+    "ok_emoji": "[OK]" if IS_WINDOWS else "✅",
+    "warning_emoji": "[!]" if IS_WINDOWS else "⚠️",
+}
 
 
 def _sanitize_injected_content(content: str) -> str:
@@ -93,6 +126,13 @@ class AutoMode:
             query_timeout_minutes: Timeout for each SDK query in minutes (default 30.0).
                 None disables timeout. Opus detection is handled by cli.py:resolve_timeout().
         """
+        # Ensure UTF-8 encoding for stdout/stderr on Windows
+        if sys.platform == 'win32':
+            if hasattr(sys.stdout, 'reconfigure'):
+                sys.stdout.reconfigure(encoding='utf-8', errors='replace')
+            if hasattr(sys.stderr, 'reconfigure'):
+                sys.stderr.reconfigure(encoding='utf-8', errors='replace')
+        
         self.sdk = sdk
         self.prompt = prompt
         self.max_turns = max_turns
@@ -148,6 +188,20 @@ class AutoMode:
         self.session_output_size = 0
         self.max_session_output = 50 * 1024 * 1024  # 50MB total session output
 
+        # Initialize Rich console for markdown rendering
+        if RICH_AVAILABLE:
+            # Create console with UTF-8 encoding and markup enabled
+            self.console = Console(
+                file=sys.stdout,
+                force_terminal=True,
+                markup=True,
+                force_interactive=False,
+                no_color=False,
+                legacy_windows=False
+            )
+        else:
+            self.console = None
+
         # Safety: Detect if we're using temp staging directory (safety feature)
         self.staged_dir = os.environ.get("AMPLIHACK_STAGED_DIR")
         self.original_cwd_from_env = os.environ.get("AMPLIHACK_ORIGINAL_CWD")
@@ -174,7 +228,7 @@ class AutoMode:
             except ImportError as e:
                 # Rich should be installed as required dependency
                 # If missing, something is wrong with the installation
-                print("\n⚠️  ERROR: Rich library required but not found", file=sys.stderr)
+                print(f"\n{EMOJI['warning_emoji']} ERROR: Rich library required but not found", file=sys.stderr)
                 print("   This should not happen - Rich is a required dependency", file=sys.stderr)
                 print(f"   Error: {e}", file=sys.stderr)
                 print(
@@ -200,7 +254,7 @@ class AutoMode:
                 self.state.add_log(msg, timestamp=False)
 
         # Always write to file (including DEBUG)
-        with open(self.log_dir / "auto.log", "a") as f:
+        with open(self.log_dir / "auto.log", "a", encoding="utf-8") as f:
             f.write(f"[{time.strftime('%H:%M:%S')}] [{level}] {msg}\n")
 
     def _format_elapsed(self, seconds: float) -> str:
@@ -269,22 +323,31 @@ class AutoMode:
 
         self.log(f"Running: {cmd[0]} ...")
 
-        # Create a pseudo-terminal for stdin
+        # Create a pseudo-terminal for stdin on Unix (not available on Windows)
         # This allows any subprocess (including children) to read from it
-        master_fd, slave_fd = pty.openpty()
+        if pty is not None:
+            master_fd, slave_fd = pty.openpty()
+            stdin_fd = slave_fd
+        else:
+            # On Windows, use PIPE instead
+            master_fd = None
+            stdin_fd = subprocess.PIPE
 
         # Use Popen to capture and mirror output in real-time
         process = subprocess.Popen(
             cmd,
-            stdin=slave_fd,  # Use slave side of pty as stdin
+            stdin=stdin_fd,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             text=True,
+            encoding='utf-8',  # Explicit UTF-8 encoding for proper emoji/unicode support
+            errors='replace',  # Replace decode errors instead of crashing
             cwd=self.working_dir,
         )
 
-        # Close slave_fd in parent process (child has a copy)
-        os.close(slave_fd)
+        # Close slave_fd in parent process on Unix (child has a copy)
+        if pty is not None:
+            os.close(slave_fd)
 
         # Capture output while mirroring to stdout/stderr
         stdout_lines = []
@@ -330,14 +393,21 @@ class AutoMode:
         stderr_thread = threading.Thread(
             target=read_stream, args=(process.stderr, stderr_lines, sys.stderr)
         )
-        stdin_thread = threading.Thread(
-            target=feed_pty_stdin, args=(master_fd, process), daemon=True
-        )
 
-        # Start threads
+        # Start output reading threads
         stdout_thread.start()
         stderr_thread.start()
-        stdin_thread.start()
+
+        # Only start stdin feeding thread on Unix with pty
+        if master_fd is not None:
+            stdin_thread = threading.Thread(
+                target=feed_pty_stdin, args=(master_fd, process), daemon=True
+            )
+            stdin_thread.start()
+        else:
+            # On Windows, close stdin immediately since we're not using it
+            if process.stdin:
+                process.stdin.close()
 
         # Wait for process to complete
         process.wait()
@@ -442,7 +512,7 @@ Document your decisions and reasoning in comments/logs."""
         BLUE = "\033[34m"
         RESET = "\033[0m"
 
-        lines = [f"\n{BOLD}📋 Todo List:{RESET}"]
+        lines = [f"\n{BOLD}{EMOJI['clipboard']} Todo List:{RESET}"]
 
         for i, todo in enumerate(todos, 1):
             status = todo.get("status", "pending")
@@ -451,13 +521,13 @@ Document your decisions and reasoning in comments/logs."""
 
             # Choose status indicator and color
             if status == "completed":
-                indicator = f"{GREEN}✓{RESET}"
+                indicator = f"{GREEN}{EMOJI['check']}{RESET}"
                 text = content
             elif status == "in_progress":
-                indicator = f"{YELLOW}⟳{RESET}"
+                indicator = f"{YELLOW}{EMOJI['clock']}{RESET}"
                 text = active_form
             else:  # pending
-                indicator = f"{BLUE}○{RESET}"
+                indicator = f"{BLUE}{EMOJI['circle']}{RESET}"
                 text = content
 
             lines.append(f"  {indicator} {text}")
@@ -472,27 +542,27 @@ Document your decisions and reasoning in comments/logs."""
         """
         try:
             # LOG ENTRY POINT - Confirm method is called
-            self.log(f"🎯 TodoWrite CALLED with {len(todos)} items", level="INFO")
+            self.log(f"[*] TodoWrite CALLED with {len(todos)} items", level="INFO")
 
             # Format for terminal display
             formatted = self._format_todos_for_terminal(todos)
             if formatted:
                 print(formatted, flush=True)
-                self.log("✅ TodoWrite formatted output printed to terminal", level="INFO")
+                self.log(f"{EMOJI['ok_emoji']} TodoWrite formatted output printed to terminal", level="INFO")
             else:
-                self.log("⚠️  TodoWrite formatting returned empty string", level="WARNING")
+                self.log(f"{EMOJI['warning_emoji']} TodoWrite formatting returned empty string", level="WARNING")
 
             # Update message capture state (thread-safe)
             self.message_capture.update_todos(todos)
-            self.log("✅ TodoWrite updated message_capture state", level="INFO")
+            self.log(f"{EMOJI['ok_emoji']} TodoWrite updated message_capture state", level="INFO")
 
             # Update UI state if enabled (thread-safe)
             if self.ui_enabled and hasattr(self, "state"):
                 self.state.update_todos(todos)
-                self.log("✅ TodoWrite updated UI state", level="INFO")
+                self.log(f"{EMOJI['ok_emoji']} TodoWrite updated UI state", level="INFO")
             else:
                 self.log(
-                    f"⚠️  TodoWrite UI update skipped (ui_enabled={self.ui_enabled})", level="INFO"
+                    f"{EMOJI['warning_emoji']} TodoWrite UI update skipped (ui_enabled={self.ui_enabled})", level="INFO"
                 )
 
             self.log(f"Updated todo list ({len(todos)} items)", level="DEBUG")
@@ -587,24 +657,31 @@ Document your decisions and reasoning in comments/logs."""
                                         )
                                         return (1, "Session output too large")
 
-                                    print(text, end="", flush=True)
+                                    # Render through Rich Markdown for proper formatting
+                                    if self.console is not None and RICH_AVAILABLE:
+                                        # Use Rich Markdown to render markdown syntax
+                                        self.console.print(Markdown(text), end="")
+                                        sys.stdout.flush()  # Ensure output is flushed
+                                    else:
+                                        # Fallback to raw print if Rich not available
+                                        print(text, end="", flush=True)
                                     output_lines.append(text)
 
                                 # Handle tool_use blocks (TodoWrite)
                                 elif hasattr(block, "type") and block.type == "tool_use":
                                     tool_name = getattr(block, "name", None)
                                     self.log(
-                                        f"🔍 Detected tool_use block: {tool_name}", level="INFO"
+                                        f"{EMOJI['search']} Detected tool_use block: {tool_name}", level="INFO"
                                     )
 
                                     if tool_name == "TodoWrite":
-                                        self.log("🎯 TodoWrite tool detected!", level="INFO")
+                                        self.log("[*] TodoWrite tool detected!", level="INFO")
                                         # Extract todos from input object (not dict!)
                                         # block.input is an object with attributes, not a dict
                                         if hasattr(block, "input"):
                                             tool_input = block.input
                                             self.log(
-                                                f"✓ Block has input attribute, type: {type(tool_input)}",
+                                                f"{EMOJI['check']} Block has input attribute, type: {type(tool_input)}",
                                                 level="INFO",
                                             )
 
@@ -612,7 +689,7 @@ Document your decisions and reasoning in comments/logs."""
                                             if hasattr(tool_input, "todos"):
                                                 todos = tool_input.todos
                                                 self.log(
-                                                    f"✓ Input has todos attribute with {len(todos)} items",
+                                                    f"{EMOJI['check']} Input has todos attribute with {len(todos)} items",
                                                     level="INFO",
                                                 )
                                                 self._handle_todo_write(todos)
@@ -623,18 +700,18 @@ Document your decisions and reasoning in comments/logs."""
                                             ):
                                                 todos = tool_input["todos"]
                                                 self.log(
-                                                    f"✓ Input is dict with todos key ({len(todos)} items)",
+                                                    f"{EMOJI['check']} Input is dict with todos key ({len(todos)} items)",
                                                     level="INFO",
                                                 )
                                                 self._handle_todo_write(todos)
                                             else:
                                                 self.log(
-                                                    f"⚠️  Input has no todos attribute or key. Attributes: {dir(tool_input)}",
+                                                    f"{EMOJI['warning_emoji']} Input has no todos attribute or key. Attributes: {dir(tool_input)}",
                                                     level="WARNING",
                                                 )
                                         else:
                                             self.log(
-                                                "⚠️  Block has no input attribute", level="WARNING"
+                                                f"{EMOJI['warning_emoji']} Block has no input attribute", level="WARNING"
                                             )
 
                         elif msg_type == "ResultMessage":
@@ -802,19 +879,19 @@ Document your decisions and reasoning in comments/logs."""
             elapsed = time.time() - start_time
 
             if result.returncode == 0:
-                self.log(f"✓ Hook {hook} completed in {elapsed:.1f}s")
+                self.log(f"{EMOJI['check']} Hook {hook} completed in {elapsed:.1f}s")
             else:
                 self.log(
-                    f"⚠ Hook {hook} returned exit code {result.returncode} after {elapsed:.1f}s"
+                    f"{EMOJI['warning']} Hook {hook} returned exit code {result.returncode} after {elapsed:.1f}s"
                 )
                 if result.stderr:
                     self.log(f"Hook stderr: {result.stderr[:200]}")
 
         except subprocess.TimeoutExpired:
             elapsed = time.time() - start_time
-            self.log(f"✗ Hook {hook} timed out after {elapsed:.1f}s")
+            self.log(f"{EMOJI['cross']} Hook {hook} timed out after {elapsed:.1f}s")
         except Exception as e:
-            self.log(f"✗ Hook {hook} failed: {e}")
+            self.log(f"{EMOJI['cross']} Hook {hook} failed: {e}")
 
     def _start_ui_thread(self) -> None:
         """Start UI in a separate thread if UI mode is enabled."""
@@ -1018,7 +1095,7 @@ Current Turn: {turn}/{self.max_turns}"""
                     or "objective achieved" in eval_lower
                     or "all criteria met" in eval_lower
                 ):
-                    self.log("✓ Objective achieved!")
+                    self.log(f"{EMOJI['check']} Objective achieved!")
                     if self.ui_enabled and hasattr(self, "state"):
                         self.state.update_status("completed")
                     break
@@ -1148,7 +1225,7 @@ Objective:
                 if self.fork_manager.should_fork():
                     elapsed = self.fork_manager.get_elapsed_time()
                     self.log(
-                        f"⚠️  Session approaching 60-minute limit ({self._format_elapsed(elapsed)}), forking..."
+                        f"{EMOJI['warning_emoji']} Session approaching 60-minute limit ({self._format_elapsed(elapsed)}), forking..."
                     )
 
                     # Export current session state before fork
@@ -1160,7 +1237,7 @@ Objective:
                     # Trigger SDK fork and get new options
                     options = self.fork_manager.trigger_fork(options)
                     self.fork_manager.reset()
-                    self.log(f"✓ Session forked (Fork {self.fork_manager.get_fork_count()})")
+                    self.log(f"{EMOJI['check']} Session forked (Fork {self.fork_manager.get_fork_count()})")
 
                     # Clear message capture for new fork (fresh start)
                     self.message_capture.clear()
@@ -1239,7 +1316,7 @@ Current Turn: {turn}/{self.max_turns}"""
                     or "objective achieved" in eval_lower
                     or "all criteria met" in eval_lower
                 ):
-                    self.log("✓ Objective achieved!")
+                    self.log(f"{EMOJI['check']} Objective achieved!")
                     if self.ui_enabled and hasattr(self, "state"):
                         self.state.update_status("completed")
                     break
@@ -1409,7 +1486,7 @@ Current Turn: {turn}/{self.max_turns}"""
                 raise FileNotFoundError(error_msg)
 
             self.log(
-                f"✓ Session transcript exported ({len(messages)} messages, {self._format_elapsed(total_duration)})"
+                f"{EMOJI['check']} Session transcript exported ({len(messages)} messages, {self._format_elapsed(total_duration)})"
             )
 
         except (ValueError, FileNotFoundError) as e:

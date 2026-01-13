@@ -2,9 +2,18 @@
 
 import json
 import os
+import platform
 import subprocess
 import sys
 from pathlib import Path
+
+# Platform-specific emoji support
+IS_WINDOWS = platform.system() == "Windows"
+EMOJI = {
+    "check": "[OK]" if IS_WINDOWS else "✓",
+    "cross": "[X]" if IS_WINDOWS else "✗",
+    "warning": "[!]" if IS_WINDOWS else "⚠",
+}
 
 
 def check_codex() -> bool:
@@ -22,7 +31,7 @@ def install_codex() -> bool:
     CODEX_PACKAGE = "@openai/codex-cli"  # Consider pinning to @latest or specific version
 
     print(f"Installing {CODEX_PACKAGE}...")
-    print("⚠ This will install a global npm package.")
+    print(f"{EMOJI['warning']} This will install a global npm package.")
 
     # Skip prompt in CI/non-interactive environments
     if sys.stdin.isatty():
@@ -43,9 +52,9 @@ def install_codex() -> bool:
             ["npm", "install", "-g", CODEX_PACKAGE], check=False, capture_output=True, text=True
         )
         if result.returncode == 0:
-            print("✓ Codex CLI installed")
+            print(f"{EMOJI['check']} Codex CLI installed")
             return True
-        print(f"✗ Installation failed: {result.stderr[:200]}")
+        print(f"{EMOJI['cross']} Installation failed: {result.stderr[:200]}")
         return False
     except FileNotFoundError:
         print("Error: npm not found. Install Node.js first.")
@@ -90,7 +99,7 @@ def configure_codex() -> bool:
             with open(config_file, "w", encoding="utf-8") as f:
                 json.dump(config, f, indent=2)
 
-            print("✓ Codex configured with approval_mode: auto")
+            print(f"{EMOJI['check']} Codex configured with approval_mode: auto")
             return True
 
         print("Codex already configured")

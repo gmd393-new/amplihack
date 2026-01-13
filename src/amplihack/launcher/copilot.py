@@ -1,7 +1,15 @@
 """Copilot CLI launcher - simple wrapper around copilot command."""
 
 import os
+import platform
 import subprocess
+
+# Platform-specific emoji support
+IS_WINDOWS = platform.system() == "Windows"
+EMOJI = {
+    "check": "[OK]" if IS_WINDOWS else "✓",
+    "cross": "[X]" if IS_WINDOWS else "✗",
+}
 
 
 def check_copilot() -> bool:
@@ -19,9 +27,9 @@ def install_copilot() -> bool:
     try:
         result = subprocess.run(["npm", "install", "-g", "@github/copilot"], check=False)
         if result.returncode == 0:
-            print("✓ Copilot CLI installed")
+            print(f"{EMOJI['check']} Copilot CLI installed")
             return True
-        print("✗ Installation failed")
+        print(f"{EMOJI['cross']} Installation failed")
         return False
     except FileNotFoundError:
         print("Error: npm not found. Install Node.js first.")

@@ -9,6 +9,7 @@ displaying auto mode execution state with 5 main panels:
 - Prompt input area
 """
 
+import platform
 import select
 import sys
 import threading
@@ -16,6 +17,13 @@ import time
 from collections import deque
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
+
+# Platform-specific emoji support
+IS_WINDOWS = platform.system() == "Windows"
+EMOJI = {
+    "check": "[OK]" if IS_WINDOWS else "✓",
+    "cross": "[X]" if IS_WINDOWS else "✗",
+}
 
 try:
     from rich import box
@@ -174,10 +182,10 @@ class AutoModeUI:
             status_icon = "▶"
             status_style = "green"
         elif status == "completed":
-            status_icon = "✓"
+            status_icon = EMOJI["check"]
             status_style = "bright_green"
         elif status == "error":
-            status_icon = "✗"
+            status_icon = EMOJI["cross"]
             status_style = "red"
         else:
             status_icon = "◆"
@@ -228,7 +236,7 @@ class AutoModeUI:
                 content = todo.get("content", "")
 
                 if status == "completed":
-                    icon = "✓"
+                    icon = EMOJI["check"]
                     style = "green"
                 elif status == "in_progress":
                     icon = "▶"
@@ -277,7 +285,7 @@ class AutoModeUI:
         help_text.append("[h] Help", style="white")
 
         if self._pending_input:
-            status = Text(f"\n✓ {len(self._pending_input)} instruction(s) queued", style="green")
+            status = Text(f"\n{EMOJI['check']} {len(self._pending_input)} instruction(s) queued", style="green")
             help_text.append(status)
 
         return Panel(help_text, title="Controls", box=box.ROUNDED, border_style="white")
